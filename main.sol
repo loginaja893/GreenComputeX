@@ -373,3 +373,78 @@ contract GreenComputeX is GCXReentrancy {
         Matched,
         Delivered,
         Finalized,
+        Disputed,
+        Cancelled
+    }
+
+    struct JobSpec {
+        address client;
+        address provider;
+        address token; // address(0) indicates native ETH
+        uint256 totalPrice;
+        uint64 postedAt;
+        uint64 validUntil;
+        uint64 deliverBy;
+        uint32 units;
+        uint16 feeBps;
+        bytes32 requirements;
+        bytes32 matchSalt;
+        bytes32 jobSalt;
+        bytes32 offerSalt;
+        bytes32 ticketId;
+        bytes32 offerId;
+        bytes32 matchId;
+        bytes32 resultHash;
+        bytes32 metaHash;
+        JobState state;
+    }
+
+    mapping(bytes32 jobId => JobSpec) private _job;
+
+    // tracking escrow balance per job for safe pull-based payout
+    mapping(bytes32 jobId => uint256 locked) private _jobEscrow;
+
+    // per-provider pending credits (to allow fail-open in case payout address blocks)
+    mapping(address provider => mapping(address token => uint256 amount)) public providerCredits;
+    mapping(address client => mapping(address token => uint256 amount)) public clientCredits;
+
+    // ------------------------- Disputes -------------------------
+
+    enum DisputeRuling {
+        Unset,
+        ClientWins,
+        ProviderWins,
+        Split
+    }
+
+    struct DisputeCase {
+        uint64 openedAt;
+        uint64 closeAfter;
+        uint96 clientPenaltyBps;
+        uint96 providerPenaltyBps;
+        bytes32 disputeSalt;
+        bytes32 clientClaim;
+        bytes32 providerClaim;
+        DisputeRuling ruling;
+        bool resolved;
+    }
+
+    mapping(bytes32 jobId => DisputeCase) private _dispute;
+
+    // ------------------------- Events -------------------------
+
+    event CapabilityShifted(bytes32 indexed cap, address indexed prior, address indexed next);
+    event LanePaused(bytes32 indexed lane, address indexed operator);
+    event LaneResumed(bytes32 indexed lane, address indexed operator);
+
+    event TokenListed(address indexed token, address indexed lister);
+    event TokenDelisted(address indexed token, address indexed lister);
+
+    event ProviderJoined(address indexed provider, address indexed payout, uint256 stake, bytes32 metaHash, bytes32 caps);
+    event ProviderUpdated(address indexed provider, address indexed payout, bytes32 metaHash, bytes32 caps, uint256 stake);
+    event ProviderStateSet(address indexed provider, ProviderState prior, ProviderState next);
+
+    event NonceBumped(address indexed signer, uint256 prior, uint256 next);
+
+    event JobPosted(bytes32 indexed jobId, address indexed client, address token, uint256 totalPrice, uint64 deliverBy);
+    event JobMatched(bytes32 indexed jobId, address indexed provider, bytes32 ticketId, bytes32 offerId, bytes32 matchId);
