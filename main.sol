@@ -823,3 +823,78 @@ contract GreenComputeX is GCXReentrancy {
 
         if (p.totalPrice < j.totalPrice) {
             uint256 remainder = j.totalPrice - p.totalPrice;
+            _jobEscrow[p.jobId] = p.totalPrice;
+            _creditClient(j.client, j.token, remainder, keccak256("job.match.remainder"));
+        }
+
+        // Consume nonces: bump to avoid replay.
+        nonceOf[p.client] = p.clientNonce + 1;
+        nonceOf[p.provider] = p.providerNonce + 1;
+        emit NonceBumped(p.client, p.clientNonce, p.clientNonce + 1);
+        emit NonceBumped(p.provider, p.providerNonce, p.providerNonce + 1);
+
+        emit JobMatched(p.jobId, p.provider, ticketId, offerId, matchId);
+    }
+
+    // ------------------------- Delivery / Settlement -------------------------
+
+    function deliverResult(bytes32 jobId, bytes32 resultHash, bytes32 metaHash) external whenLaneActive(LANE_SETTLE) {
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Matched) revert GCX_StateMismatch(keccak256("job.not_deliverable"));
+        if (msg.sender != j.provider) revert GCX_Unauthorized(msg.sender, keccak256("job.deliver"));
+
+        uint64 nowTs = uint64(block.timestamp);
+        if (nowTs > j.deliverBy) revert GCX_DeadlineElapsed(nowTs, j.deliverBy);
+
+        j.resultHash = resultHash;
+        j.metaHash = metaHash;
+        j.state = JobState.Delivered;
+        emit JobDelivered(jobId, resultHash, metaHash);
+    }
+
+    function finalize(bytes32 jobId) external nonReentrant whenLaneActive(LANE_SETTLE) {
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Delivered) revert GCX_StateMismatch(keccak256("job.not_finalizable"));
+
+        // Either client finalizes, or provider finalizes after grace.
+        uint64 nowTs = uint64(block.timestamp);
+        bool byClient = msg.sender == j.client;
+        bool byProviderAfterGrace = msg.sender == j.provider && nowTs >= j.deliverBy + uint64(FINALITY_GRACE);
+        if (!byClient && !byProviderAfterGrace) revert GCX_Unauthorized(msg.sender, keccak256("job.finalize"));
+
+        (uint256 paid, uint256 feePaid) = _settleToProvider(jobId, j.provider, keccak256("job.finalize"));
+
+        j.state = JobState.Finalized;
+        emit JobFinalized(jobId, j.provider, paid, feePaid);
+    }
+
+    function _settleToProvider(bytes32 jobId, address provider, bytes32 reason) internal returns (uint256 paid, uint256 feePaid) {
+        JobSpec storage j = _job[jobId];
+        uint256 escrowed = _jobEscrow[jobId];
+        if (escrowed == 0) revert GCX_StateMismatch(keccak256("escrow.empty"));
+
+        _jobEscrow[jobId] = 0;
+
+        feePaid = (escrowed * uint256(j.feeBps)) / BPS_DENOMINATOR;
+        paid = escrowed - feePaid;
+
+        // Pull-based credits.
+        _creditProvider(provider, j.token, paid, reason);
+        _creditTreasury(j.token, feePaid, keccak256("fee.treasury"));
+    }
+
+    // ------------------------- Disputes -------------------------
+
+    function openDispute(bytes32 jobId, bytes32 clientClaim, bytes32 providerClaim, bytes32 disputeSalt)
+        external
+        nonReentrant
+        whenLaneActive(LANE_DISPUTE)
+    {
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Delivered) revert GCX_StateMismatch(keccak256("job.not_disputable"));
+        if (msg.sender != j.client && msg.sender != j.provider) revert GCX_Unauthorized(msg.sender, keccak256("dispute.open"));
+
+        DisputeCase storage d = _dispute[jobId];
+        if (d.openedAt != 0) revert GCX_AlreadyExists(keccak256("dispute.exists"));
+
+        uint64 nowTs = uint64(block.timestamp);
