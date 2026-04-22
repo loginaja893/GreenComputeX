@@ -298,3 +298,78 @@ contract GreenComputeX is GCXReentrancy {
 
     function bumpNonce(uint256 newNonce) external {
         uint256 cur = nonceOf[msg.sender];
+        if (newNonce <= cur) revert GCX_InvalidParameter(keccak256("nonce.non_increasing"));
+        nonceOf[msg.sender] = newNonce;
+        emit NonceBumped(msg.sender, cur, newNonce);
+    }
+
+    function _eip712DomainSeparator() internal view returns (bytes32) {
+        // Uses a per-contract salt so domain differs even across same name/version.
+        bytes32 salt = keccak256(abi.encodePacked(GCX_DOMAIN, block.chainid, address(this)));
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("GreenComputeX")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(this),
+                salt
+            )
+        );
+    }
+
+    function _hashTicket(
+        address client,
+        address token,
+        uint256 maxPrice,
+        uint64 validUntil,
+        bytes32 requirements,
+        bytes32 jobSalt,
+        uint256 nonce
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(TICKET_TYPEHASH, client, token, maxPrice, validUntil, requirements, jobSalt, nonce));
+    }
+
+    function _hashOffer(
+        address provider,
+        address token,
+        uint256 unitPrice,
+        uint64 validUntil,
+        bytes32 capabilities,
+        bytes32 offerSalt,
+        uint256 nonce
+    ) internal pure returns (bytes32) {
+        return
+            keccak256(abi.encode(OFFER_TYPEHASH, provider, token, unitPrice, validUntil, capabilities, offerSalt, nonce));
+    }
+
+    function _hashMatch(bytes32 ticketId, bytes32 offerId, uint256 units, uint256 totalPrice, bytes32 matchSalt)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(MATCH_TYPEHASH, ticketId, offerId, units, totalPrice, matchSalt));
+    }
+
+    function _toTypedDataHash(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", _eip712DomainSeparator(), structHash));
+    }
+
+    function _validateEOAor1271(address signer, bytes32 digest, bytes memory signature) internal view {
+        if (GCXAddress.isContract(signer)) {
+            bytes4 ok = IERC1271(signer).isValidSignature(digest, signature);
+            if (ok != 0x1626ba7e) revert GCX_SignatureRejected();
+        } else {
+            address rec = GCXECDSA.recover(digest, signature);
+            if (rec != signer) revert GCX_SignatureRejected();
+        }
+    }
+
+    // ------------------------- Jobs / Escrows -------------------------
+
+    enum JobState {
+        Null,
+        Posted,
+        Matched,
+        Delivered,
+        Finalized,
