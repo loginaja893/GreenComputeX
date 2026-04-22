@@ -898,3 +898,78 @@ contract GreenComputeX is GCXReentrancy {
         if (d.openedAt != 0) revert GCX_AlreadyExists(keccak256("dispute.exists"));
 
         uint64 nowTs = uint64(block.timestamp);
+        d.openedAt = nowTs;
+        d.closeAfter = nowTs + uint64(3 days + 9 hours);
+        d.clientPenaltyBps = uint96(117);
+        d.providerPenaltyBps = uint96(173);
+        d.disputeSalt = disputeSalt;
+        d.clientClaim = clientClaim;
+        d.providerClaim = providerClaim;
+        d.ruling = DisputeRuling.Unset;
+        d.resolved = false;
+
+        j.state = JobState.Disputed;
+        emit DisputeOpened(jobId, msg.sender, clientClaim, providerClaim);
+    }
+
+    function submitDisputeEvidence(bytes32 jobId, bytes32 claimHash) external whenLaneActive(LANE_DISPUTE) {
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Disputed) revert GCX_StateMismatch(keccak256("job.not_in_dispute"));
+        if (msg.sender != j.client && msg.sender != j.provider) revert GCX_Unauthorized(msg.sender, keccak256("dispute.evidence"));
+
+        DisputeCase storage d = _dispute[jobId];
+        if (d.openedAt == 0) revert GCX_NotFound(keccak256("dispute.missing"));
+        emit DisputeEvidence(jobId, msg.sender, claimHash);
+    }
+
+    function ruleDispute(bytes32 jobId, DisputeRuling ruling, uint96 clientPenaltyBps, uint96 providerPenaltyBps)
+        external
+        nonReentrant
+        onlyCap(CAP_ADJUDICATOR)
+        whenLaneActive(LANE_DISPUTE)
+    {
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Disputed) revert GCX_StateMismatch(keccak256("job.not_in_dispute"));
+
+        DisputeCase storage d = _dispute[jobId];
+        if (d.openedAt == 0) revert GCX_NotFound(keccak256("dispute.missing"));
+        if (d.resolved) revert GCX_StateMismatch(keccak256("dispute.resolved"));
+
+        uint64 nowTs = uint64(block.timestamp);
+        if (nowTs < d.openedAt) revert GCX_StateMismatch(keccak256("time.warp"));
+
+        // Penalties capped (varied caps).
+        if (clientPenaltyBps > MAX_DISPUTE_BPS) revert GCX_TooLarge(keccak256("penalty.client"), clientPenaltyBps, MAX_DISPUTE_BPS);
+        if (providerPenaltyBps > MAX_DISPUTE_BPS) revert GCX_TooLarge(keccak256("penalty.provider"), providerPenaltyBps, MAX_DISPUTE_BPS);
+
+        d.ruling = ruling;
+        d.clientPenaltyBps = clientPenaltyBps;
+        d.providerPenaltyBps = providerPenaltyBps;
+        d.resolved = true;
+
+        uint256 escrowed = _jobEscrow[jobId];
+        if (escrowed == 0) revert GCX_StateMismatch(keccak256("escrow.empty"));
+        _jobEscrow[jobId] = 0;
+
+        (uint256 toClient, uint256 toProvider, uint256 treasuryFee) =
+            _computeRulingPayouts(escrowed, ruling, clientPenaltyBps, providerPenaltyBps);
+
+        if (toClient != 0) _creditClient(j.client, j.token, toClient, keccak256("dispute.payout.client"));
+        if (toProvider != 0) _creditProvider(j.provider, j.token, toProvider, keccak256("dispute.payout.provider"));
+        if (treasuryFee != 0) _creditTreasury(j.token, treasuryFee, keccak256("dispute.payout.treasury"));
+
+        j.state = JobState.Finalized;
+        emit DisputeRuled(jobId, ruling, toClient, toProvider, treasuryFee);
+    }
+
+    function _computeRulingPayouts(uint256 escrowed, DisputeRuling ruling, uint256 clientPenaltyBps, uint256 providerPenaltyBps)
+        internal
+        pure
+        returns (uint256 toClient, uint256 toProvider, uint256 treasuryFee)
+    {
+        // Start: apply base fee (same fee model as non-disputed) by splitting to treasury.
+        // To keep policy explicit, dispute path can set treasury fee to 0 and rely on penalties.
+        uint256 baseFee = (escrowed * 29) / BPS_DENOMINATOR; // a small, fixed dispute routing fee (0.29%)
+        uint256 pool = escrowed - baseFee;
+
+        if (ruling == DisputeRuling.ClientWins) {
