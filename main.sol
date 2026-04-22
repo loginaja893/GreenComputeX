@@ -673,3 +673,78 @@ contract GreenComputeX is GCXReentrancy {
 
         if (deliverBy <= nowTs) revert GCX_DeadlineElapsed(nowTs, deliverBy);
         if (deliverBy - nowTs < JOB_TTL_MIN) revert GCX_TooSmall(keccak256("deliverBy.min_ttl"), deliverBy - nowTs, JOB_TTL_MIN);
+        if (deliverBy - nowTs > JOB_TTL_MAX) revert GCX_TooLarge(keccak256("deliverBy.max_ttl"), deliverBy - nowTs, JOB_TTL_MAX);
+
+        jobId = keccak256(abi.encodePacked(GCX_DOMAIN, client, token, totalPrice, validUntil, deliverBy, units, requirements, metaHash, jobSalt));
+        if (_job[jobId].state != JobState.Null) revert GCX_AlreadyExists(keccak256("job.id_collision"));
+
+        JobSpec storage j = _job[jobId];
+        j.client = client;
+        j.token = token;
+        j.totalPrice = totalPrice;
+        j.postedAt = nowTs;
+        j.validUntil = validUntil;
+        j.deliverBy = deliverBy;
+        j.units = units;
+        j.feeBps = feeBps;
+        j.requirements = requirements;
+        j.metaHash = metaHash;
+        j.jobSalt = jobSalt;
+        j.state = JobState.Posted;
+    }
+
+    function getJob(bytes32 jobId) external view returns (JobSpec memory spec, uint256 escrowed, DisputeCase memory dispute) {
+        spec = _job[jobId];
+        escrowed = _jobEscrow[jobId];
+        dispute = _dispute[jobId];
+    }
+
+    function cancelJob(bytes32 jobId) external nonReentrant whenLaneActive(LANE_JOB) {
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Posted) revert GCX_StateMismatch(keccak256("job.not_posted"));
+        if (msg.sender != j.client) revert GCX_Unauthorized(msg.sender, keccak256("job.cancel"));
+
+        // Deadline guard: allow cancel after ticket expiry or after deliverBy/2 for safety.
+        uint64 nowTs = uint64(block.timestamp);
+        bool ticketExpired = nowTs > j.validUntil;
+        bool midLife = nowTs > j.postedAt + uint64((j.deliverBy - j.postedAt) / 2);
+        if (!ticketExpired && !midLife) revert GCX_StateMismatch(keccak256("job.cancel.not_allowed_yet"));
+
+        j.state = JobState.Cancelled;
+
+        uint256 refund = _jobEscrow[jobId];
+        _jobEscrow[jobId] = 0;
+        _creditClient(j.client, j.token, refund, keccak256("job.cancel.refund"));
+
+        emit JobCancelled(jobId, j.client, refund);
+    }
+
+    // ------------------------- Matching -------------------------
+
+    struct MatchParams {
+        bytes32 jobId;
+
+        // ticket
+        address client;
+        address ticketToken;
+        uint256 ticketMaxPrice;
+        uint64 ticketValidUntil;
+        bytes32 requirements;
+        bytes32 jobSalt;
+        uint256 clientNonce;
+        bytes clientSig;
+
+        // offer
+        address provider;
+        address offerToken;
+        uint256 unitPrice;
+        uint64 offerValidUntil;
+        bytes32 capabilities;
+        bytes32 offerSalt;
+        uint256 providerNonce;
+        bytes providerSig;
+
+        // match
+        uint256 units;
+        uint256 totalPrice;
+        bytes32 matchSalt;
