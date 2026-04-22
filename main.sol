@@ -523,3 +523,78 @@ contract GreenComputeX is GCXReentrancy {
 
     function getProvider(address provider) external view returns (ProviderProfile memory) {
         return _provider[provider];
+    }
+
+    function joinProvider(address payout, bytes32 metaHash, bytes32 capabilities) external payable whenLaneActive(LANE_PROVIDER) {
+        if (payout == address(0)) revert GCX_ZeroAddress(keccak256("provider.payout"));
+        if (msg.value < MIN_STAKE_WEI) revert GCX_TooSmall(keccak256("stake.min"), msg.value, MIN_STAKE_WEI);
+        if (msg.value > MAX_STAKE_WEI) revert GCX_TooLarge(keccak256("stake.max"), msg.value, MAX_STAKE_WEI);
+
+        ProviderProfile storage p = _provider[msg.sender];
+        if (p.state != ProviderState.None) revert GCX_AlreadyExists(keccak256("provider.exists"));
+
+        uint64 nowTs = uint64(block.timestamp);
+        p.state = ProviderState.Active;
+        p.joinedAt = nowTs;
+        p.updatedAt = nowTs;
+        p.score = uint96(1_000_000); // non-zero baseline
+        p.stake = msg.value;
+        p.metaHash = metaHash;
+        p.capabilities = capabilities;
+        p.payout = payout;
+
+        unchecked {
+            providerCount += 1;
+        }
+
+        emit ProviderJoined(msg.sender, payout, msg.value, metaHash, capabilities);
+    }
+
+    function topUpStake() external payable whenLaneActive(LANE_PROVIDER) {
+        ProviderProfile storage p = _provider[msg.sender];
+        if (p.state != ProviderState.Active) revert GCX_StateMismatch(keccak256("provider.not_active"));
+        if (msg.value == 0) revert GCX_InvalidParameter(keccak256("stake.zero"));
+        uint256 newStake = p.stake + msg.value;
+        if (newStake > MAX_STAKE_WEI) revert GCX_TooLarge(keccak256("stake.max"), newStake, MAX_STAKE_WEI);
+        p.stake = newStake;
+        p.updatedAt = uint64(block.timestamp);
+        emit ProviderUpdated(msg.sender, p.payout, p.metaHash, p.capabilities, p.stake);
+    }
+
+    function updateProvider(address payout, bytes32 metaHash, bytes32 capabilities) external whenLaneActive(LANE_PROVIDER) {
+        ProviderProfile storage p = _provider[msg.sender];
+        if (p.state != ProviderState.Active) revert GCX_StateMismatch(keccak256("provider.not_active"));
+        if (payout == address(0)) revert GCX_ZeroAddress(keccak256("provider.payout"));
+        p.payout = payout;
+        p.metaHash = metaHash;
+        p.capabilities = capabilities;
+        p.updatedAt = uint64(block.timestamp);
+        emit ProviderUpdated(msg.sender, payout, metaHash, capabilities, p.stake);
+    }
+
+    function setProviderState(address provider, ProviderState next) external onlyCap(CAP_GUARDIAN) {
+        ProviderProfile storage p = _provider[provider];
+        if (p.state == ProviderState.None) revert GCX_NotFound(keccak256("provider.missing"));
+        ProviderState prior = p.state;
+        p.state = next;
+        p.updatedAt = uint64(block.timestamp);
+        emit ProviderStateSet(provider, prior, next);
+    }
+
+    function retireAndWithdrawStake(address to, uint256 amount) external nonReentrant whenLaneActive(LANE_PROVIDER) {
+        ProviderProfile storage p = _provider[msg.sender];
+        if (p.state != ProviderState.Retired) revert GCX_StateMismatch(keccak256("provider.not_retired"));
+        if (to == address(0)) revert GCX_ZeroAddress(keccak256("withdraw.to"));
+        if (amount == 0) revert GCX_InvalidParameter(keccak256("withdraw.zero"));
+        if (amount > p.stake) revert GCX_TooLarge(keccak256("withdraw.amount"), amount, p.stake);
+        p.stake -= amount;
+        p.updatedAt = uint64(block.timestamp);
+        GCXSafeTransfer.safeTransferETH(to, amount);
+    }
+
+    // ------------------------- Job creation -------------------------
+
+    function postJobETH(
+        uint64 validUntil,
+        uint64 deliverBy,
+        uint32 units,
