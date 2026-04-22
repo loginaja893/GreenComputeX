@@ -223,3 +223,78 @@ contract GreenComputeX is GCXReentrancy {
     // ------------------------- Bootstrap addresses -------------------------
     // NOTE: These are *example* bootstraps; roles can be rotated post-deploy.
     // (All are EIP-55 checksummed to compile cleanly as literals.)
+    address public immutable BOOTSTRAP_GUARDIAN = 0x9bE77334724F119B6698385B45b734331265f63C;
+    address public immutable BOOTSTRAP_ADJUDICATOR = 0xC57FA821E309f94f3215F57970D33908BA565A4f;
+    address public immutable BOOTSTRAP_TREASURY = 0x36175ae9D74D7E15faDB0F76FEC8D91509817D87;
+    address public immutable BOOTSTRAP_ATTEST_ORACLE = 0x33f7e55643659983B6F02fB0BdDfA09f0aE92Fe2;
+    address public immutable BOOTSTRAP_PAUSE_OPERATOR = 0x70de67046CB7797b5288e93f7Dcd76335c268107;
+    address public immutable BOOTSTRAP_TOKEN_LISTER = 0x0B7578330EB4e605AFD75a8D1409dA517213127c;
+
+    // ------------------------- Access control -------------------------
+
+    mapping(bytes32 cap => address holder) private _capHolder;
+
+    function capabilityHolder(bytes32 cap) external view returns (address) {
+        return _capHolder[cap];
+    }
+
+    modifier onlyCap(bytes32 cap) {
+        if (msg.sender != _capHolder[cap]) revert GCX_Unauthorized(msg.sender, cap);
+        _;
+    }
+
+    // ------------------------- Pausing lanes -------------------------
+
+    mapping(bytes32 lane => bool paused) private _pausedLane;
+
+    function isLanePaused(bytes32 lane) external view returns (bool) {
+        return _pausedLane[lane];
+    }
+
+    modifier whenLaneActive(bytes32 lane) {
+        if (_pausedLane[lane]) revert GCX_Paused(lane);
+        _;
+    }
+
+    // ------------------------- Provider model -------------------------
+
+    enum ProviderState {
+        None,
+        Active,
+        Suspended,
+        Retired
+    }
+
+    struct ProviderProfile {
+        ProviderState state;
+        uint64 joinedAt;
+        uint64 updatedAt;
+        uint96 score; // arbitrary score scale (off-chain can interpret)
+        uint256 stake;
+        bytes32 metaHash;
+        bytes32 capabilities; // bitmask-ish; app-specific
+        address payout;
+    }
+
+    mapping(address provider => ProviderProfile) private _provider;
+    uint256 public providerCount;
+
+    // ------------------------- Token allow-list -------------------------
+
+    mapping(address token => bool allowed) private _tokenAllowed;
+    address[] private _listedTokens;
+
+    function isTokenAllowed(address token) external view returns (bool) {
+        return _tokenAllowed[token];
+    }
+
+    function listedTokens() external view returns (address[] memory) {
+        return _listedTokens;
+    }
+
+    // ------------------------- Ticket / Offer signing -------------------------
+
+    mapping(address signer => uint256 nonce) public nonceOf;
+
+    function bumpNonce(uint256 newNonce) external {
+        uint256 cur = nonceOf[msg.sender];
