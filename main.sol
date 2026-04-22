@@ -1048,3 +1048,65 @@ contract GreenComputeX is GCXReentrancy {
             GCXSafeTransfer.safeTransferETH(to, amount);
         } else {
             IERC20Minimal(token).safeTransfer(to, amount);
+        }
+    }
+
+    function _creditProvider(address provider, address token, uint256 amount, bytes32 reason) internal {
+        if (amount == 0) return;
+        providerCredits[provider][token] += amount;
+        emit CreditAccrued(provider, token, amount, reason);
+    }
+
+    function _creditClient(address client, address token, uint256 amount, bytes32 reason) internal {
+        if (amount == 0) return;
+        clientCredits[client][token] += amount;
+        emit CreditAccrued(client, token, amount, reason);
+    }
+
+    function _creditTreasury(address token, uint256 amount, bytes32 reason) internal {
+        if (amount == 0) return;
+        providerCredits[BOOTSTRAP_TREASURY][token] += amount;
+        emit CreditAccrued(BOOTSTRAP_TREASURY, token, amount, reason);
+    }
+
+    // ------------------------- View helpers -------------------------
+
+    function quoteFee(uint256 totalPrice, uint16 feeBps) external pure returns (uint256 fee, uint256 net) {
+        if (feeBps > MAX_FEE_BPS) revert GCX_TooLarge(keccak256("fee.bps"), feeBps, MAX_FEE_BPS);
+        fee = (totalPrice * feeBps) / BPS_DENOMINATOR;
+        net = totalPrice - fee;
+    }
+
+    function previewMatchId(
+        address client,
+        address ticketToken,
+        uint256 ticketMaxPrice,
+        uint64 ticketValidUntil,
+        bytes32 requirements,
+        bytes32 jobSalt,
+        uint256 clientNonce,
+        address provider,
+        address offerToken,
+        uint256 unitPrice,
+        uint64 offerValidUntil,
+        bytes32 capabilities,
+        bytes32 offerSalt,
+        uint256 providerNonce,
+        uint256 units,
+        uint256 totalPrice,
+        bytes32 matchSalt
+    ) external view returns (bytes32 ticketId, bytes32 offerId, bytes32 matchId) {
+        bytes32 ticketDigest =
+            _toTypedDataHash(_hashTicket(client, ticketToken, ticketMaxPrice, ticketValidUntil, requirements, jobSalt, clientNonce));
+        bytes32 offerDigest =
+            _toTypedDataHash(_hashOffer(provider, offerToken, unitPrice, offerValidUntil, capabilities, offerSalt, providerNonce));
+        ticketId = keccak256(abi.encodePacked("T", ticketDigest));
+        offerId = keccak256(abi.encodePacked("O", offerDigest));
+        matchId =
+            keccak256(abi.encodePacked("M", _toTypedDataHash(_hashMatch(ticketId, offerId, units, totalPrice, matchSalt))));
+    }
+
+    function domainSeparator() external view returns (bytes32) {
+        return _eip712DomainSeparator();
+    }
+}
