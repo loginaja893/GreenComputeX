@@ -448,3 +448,78 @@ contract GreenComputeX is GCXReentrancy {
 
     event JobPosted(bytes32 indexed jobId, address indexed client, address token, uint256 totalPrice, uint64 deliverBy);
     event JobMatched(bytes32 indexed jobId, address indexed provider, bytes32 ticketId, bytes32 offerId, bytes32 matchId);
+    event JobDelivered(bytes32 indexed jobId, bytes32 indexed resultHash, bytes32 metaHash);
+    event JobFinalized(bytes32 indexed jobId, address indexed beneficiary, uint256 paid, uint256 feePaid);
+    event JobCancelled(bytes32 indexed jobId, address indexed client, uint256 refund);
+
+    event DisputeOpened(bytes32 indexed jobId, address indexed opener, bytes32 clientClaim, bytes32 providerClaim);
+    event DisputeEvidence(bytes32 indexed jobId, address indexed submitter, bytes32 claimHash);
+    event DisputeRuled(bytes32 indexed jobId, DisputeRuling ruling, uint256 clientAmount, uint256 providerAmount, uint256 treasuryFee);
+
+    event CreditAccrued(address indexed who, address indexed token, uint256 amount, bytes32 indexed reason);
+    event CreditWithdrawn(address indexed who, address indexed token, uint256 amount, address to);
+
+    event OracleAttested(bytes32 indexed attestationId, address indexed oracle, bytes32 indexed jobId);
+
+    // ------------------------- Constructor -------------------------
+
+    constructor() payable {
+        if (msg.value != 0) revert GCX_NotPayable();
+
+        _capHolder[CAP_ADMIN] = msg.sender;
+        _capHolder[CAP_GUARDIAN] = BOOTSTRAP_GUARDIAN;
+        _capHolder[CAP_ADJUDICATOR] = BOOTSTRAP_ADJUDICATOR;
+        _capHolder[CAP_LISTER] = BOOTSTRAP_TOKEN_LISTER;
+        _capHolder[CAP_PAUSE_OPERATOR] = BOOTSTRAP_PAUSE_OPERATOR;
+
+        // Native ETH always allowed.
+        _tokenAllowed[address(0)] = true;
+        _listedTokens.push(address(0));
+
+        emit CapabilityShifted(CAP_ADMIN, address(0), msg.sender);
+        emit CapabilityShifted(CAP_GUARDIAN, address(0), BOOTSTRAP_GUARDIAN);
+        emit CapabilityShifted(CAP_ADJUDICATOR, address(0), BOOTSTRAP_ADJUDICATOR);
+        emit CapabilityShifted(CAP_LISTER, address(0), BOOTSTRAP_TOKEN_LISTER);
+        emit CapabilityShifted(CAP_PAUSE_OPERATOR, address(0), BOOTSTRAP_PAUSE_OPERATOR);
+    }
+
+    // ------------------------- Admin / Roles -------------------------
+
+    function shiftCapability(bytes32 cap, address next) external onlyCap(CAP_ADMIN) {
+        if (next == address(0)) revert GCX_ZeroAddress(keccak256("cap.holder"));
+        address prior = _capHolder[cap];
+        _capHolder[cap] = next;
+        emit CapabilityShifted(cap, prior, next);
+    }
+
+    function pauseLane(bytes32 lane) external onlyCap(CAP_PAUSE_OPERATOR) {
+        _pausedLane[lane] = true;
+        emit LanePaused(lane, msg.sender);
+    }
+
+    function resumeLane(bytes32 lane) external onlyCap(CAP_PAUSE_OPERATOR) {
+        _pausedLane[lane] = false;
+        emit LaneResumed(lane, msg.sender);
+    }
+
+    // ------------------------- Token management -------------------------
+
+    function listToken(address token) external onlyCap(CAP_LISTER) {
+        if (token == address(0)) revert GCX_InvalidParameter(keccak256("token.zero_not_needed"));
+        if (_tokenAllowed[token]) revert GCX_AlreadyExists(keccak256("token.listed"));
+        _tokenAllowed[token] = true;
+        _listedTokens.push(token);
+        emit TokenListed(token, msg.sender);
+    }
+
+    function delistToken(address token) external onlyCap(CAP_LISTER) {
+        if (token == address(0)) revert GCX_InvalidParameter(keccak256("token.native_cannot_delist"));
+        if (!_tokenAllowed[token]) revert GCX_NotFound(keccak256("token.not_listed"));
+        _tokenAllowed[token] = false;
+        emit TokenDelisted(token, msg.sender);
+    }
+
+    // ------------------------- Provider lifecycle -------------------------
+
+    function getProvider(address provider) external view returns (ProviderProfile memory) {
+        return _provider[provider];
