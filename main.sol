@@ -748,3 +748,78 @@ contract GreenComputeX is GCXReentrancy {
         uint256 units;
         uint256 totalPrice;
         bytes32 matchSalt;
+    }
+
+    function matchJob(MatchParams calldata p) external nonReentrant whenLaneActive(LANE_JOB) returns (bytes32 matchId) {
+        JobSpec storage j = _job[p.jobId];
+        if (j.state != JobState.Posted) revert GCX_StateMismatch(keccak256("job.not_matchable"));
+
+        if (j.client != p.client) revert GCX_InvalidParameter(keccak256("ticket.client_mismatch"));
+        if (j.token != p.ticketToken) revert GCX_InvalidParameter(keccak256("ticket.token_mismatch"));
+        if (j.totalPrice != p.ticketMaxPrice) revert GCX_InvalidParameter(keccak256("ticket.price_mismatch"));
+        if (j.validUntil != p.ticketValidUntil) revert GCX_InvalidParameter(keccak256("ticket.validUntil_mismatch"));
+        if (j.requirements != p.requirements) revert GCX_InvalidParameter(keccak256("ticket.requirements_mismatch"));
+        if (j.jobSalt != p.jobSalt) revert GCX_InvalidParameter(keccak256("ticket.jobSalt_mismatch"));
+
+        if (j.token != p.offerToken) revert GCX_InvalidParameter(keccak256("offer.token_mismatch"));
+        if (p.units == 0 || p.units > j.units) revert GCX_InvalidParameter(keccak256("match.units_bad"));
+        if (p.totalPrice == 0 || p.totalPrice > j.totalPrice) revert GCX_InvalidParameter(keccak256("match.price_bad"));
+
+        uint64 nowTs = uint64(block.timestamp);
+        if (p.ticketValidUntil <= nowTs) revert GCX_DeadlineElapsed(nowTs, p.ticketValidUntil);
+        if (p.offerValidUntil <= nowTs) revert GCX_DeadlineElapsed(nowTs, p.offerValidUntil);
+        if (j.deliverBy <= nowTs) revert GCX_DeadlineElapsed(nowTs, j.deliverBy);
+
+        ProviderProfile storage prov = _provider[p.provider];
+        if (prov.state != ProviderState.Active) revert GCX_StateMismatch(keccak256("provider.not_active"));
+        if (prov.capabilities & p.capabilities != p.capabilities) revert GCX_InvalidParameter(keccak256("provider.capabilities_missing"));
+
+        // Nonces must match current.
+        if (nonceOf[p.client] != p.clientNonce) revert GCX_StateMismatch(keccak256("nonce.client_mismatch"));
+        if (nonceOf[p.provider] != p.providerNonce) revert GCX_StateMismatch(keccak256("nonce.provider_mismatch"));
+
+        // Verify signatures.
+        bytes32 ticketStructHash = _hashTicket(
+            p.client,
+            p.ticketToken,
+            p.ticketMaxPrice,
+            p.ticketValidUntil,
+            p.requirements,
+            p.jobSalt,
+            p.clientNonce
+        );
+        bytes32 offerStructHash = _hashOffer(
+            p.provider,
+            p.offerToken,
+            p.unitPrice,
+            p.offerValidUntil,
+            p.capabilities,
+            p.offerSalt,
+            p.providerNonce
+        );
+        bytes32 ticketDigest = _toTypedDataHash(ticketStructHash);
+        bytes32 offerDigest = _toTypedDataHash(offerStructHash);
+        _validateEOAor1271(p.client, ticketDigest, p.clientSig);
+        _validateEOAor1271(p.provider, offerDigest, p.providerSig);
+
+        bytes32 ticketId = keccak256(abi.encodePacked("T", ticketDigest));
+        bytes32 offerId = keccak256(abi.encodePacked("O", offerDigest));
+        matchId = keccak256(abi.encodePacked("M", _toTypedDataHash(_hashMatch(ticketId, offerId, p.units, p.totalPrice, p.matchSalt))));
+
+        if (j.matchId != bytes32(0)) revert GCX_AlreadyExists(keccak256("job.already_matched"));
+
+        // Commit match
+        j.provider = p.provider;
+        j.ticketId = ticketId;
+        j.offerId = offerId;
+        j.matchId = matchId;
+        j.offerSalt = p.offerSalt;
+        j.matchSalt = p.matchSalt;
+        j.state = JobState.Matched;
+
+        // Lock only what is needed; refund remainder to client credits.
+        uint256 escrowed = _jobEscrow[p.jobId];
+        if (escrowed != j.totalPrice) revert GCX_StateMismatch(keccak256("escrow.corrupt"));
+
+        if (p.totalPrice < j.totalPrice) {
+            uint256 remainder = j.totalPrice - p.totalPrice;
