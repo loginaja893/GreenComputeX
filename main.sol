@@ -148,3 +148,78 @@ abstract contract GCXReentrancy {
     modifier nonReentrant() {
         if (_gcxGate == 2) revert GCX_ReentrancyTripwire();
         _gcxGate = 2;
+        _;
+        _gcxGate = 1;
+    }
+
+    constructor() {
+        _gcxGate = 1;
+    }
+}
+
+// ----------------------------- Errors -----------------------------
+
+error GCX_Unauthorized(address caller, bytes32 capability);
+error GCX_InvalidParameter(bytes32 what);
+error GCX_AlreadyExists(bytes32 what);
+error GCX_NotFound(bytes32 what);
+error GCX_StateMismatch(bytes32 what);
+error GCX_DeadlineElapsed(uint64 nowTs, uint64 deadlineTs);
+error GCX_NotPayable();
+error GCX_ReentrancyTripwire();
+error GCX_BadBytesSlice();
+error GCX_ZeroAddress(bytes32 what);
+error GCX_Paused(bytes32 lane);
+error GCX_TooLarge(bytes32 what, uint256 got, uint256 max);
+error GCX_TooSmall(bytes32 what, uint256 got, uint256 min);
+error GCX_SignatureRejected();
+error GCX_UnsupportedToken(address token);
+error GCX_InvalidProof(bytes32 what);
+error GCX_PayoutBlocked(address to, uint256 amount);
+
+// ----------------------------- Contract -----------------------------
+
+contract GreenComputeX is GCXReentrancy {
+    using GCXSafeTransfer for IERC20Minimal;
+
+    // ------------------------- Domain constants -------------------------
+
+    bytes32 public constant GCX_DOMAIN = keccak256("GreenComputeX.domain.v1.compute-matching");
+    bytes32 public constant CAP_ADMIN = keccak256("GreenComputeX.cap.ADMIN");
+    bytes32 public constant CAP_GUARDIAN = keccak256("GreenComputeX.cap.GUARDIAN");
+    bytes32 public constant CAP_ADJUDICATOR = keccak256("GreenComputeX.cap.ADJUDICATOR");
+    bytes32 public constant CAP_LISTER = keccak256("GreenComputeX.cap.TOKEN_LISTER");
+    bytes32 public constant CAP_PAUSE_OPERATOR = keccak256("GreenComputeX.cap.PAUSE_OPERATOR");
+
+    bytes32 public constant LANE_PROVIDER = keccak256("GreenComputeX.lane.PROVIDER");
+    bytes32 public constant LANE_JOB = keccak256("GreenComputeX.lane.JOB");
+    bytes32 public constant LANE_SETTLE = keccak256("GreenComputeX.lane.SETTLE");
+    bytes32 public constant LANE_DISPUTE = keccak256("GreenComputeX.lane.DISPUTE");
+
+    bytes32 public constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract,bytes32 salt)");
+    bytes32 public constant TICKET_TYPEHASH = keccak256(
+        "ComputeTicket(address client,address token,uint256 maxPrice,uint64 validUntil,bytes32 requirements,bytes32 jobSalt,uint256 nonce)"
+    );
+    bytes32 public constant OFFER_TYPEHASH = keccak256(
+        "ProviderOffer(address provider,address token,uint256 unitPrice,uint64 validUntil,bytes32 capabilities,bytes32 offerSalt,uint256 nonce)"
+    );
+    bytes32 public constant MATCH_TYPEHASH = keccak256(
+        "ComputeMatch(bytes32 ticketId,bytes32 offerId,uint256 units,uint256 totalPrice,bytes32 matchSalt)"
+    );
+
+    // Randomized-but-sane defaults (varied; not “template” constants).
+    uint256 public constant BPS_DENOMINATOR = 10_000;
+    uint256 public constant MAX_FEE_BPS = 247; // 2.47%
+    uint256 public constant MAX_DISPUTE_BPS = 683; // 6.83% cap for penalty component
+    uint256 public constant MIN_STAKE_WEI = 0.09 ether;
+    uint256 public constant MAX_STAKE_WEI = 88.6 ether;
+    uint256 public constant JOB_TTL_MIN = 7 minutes;
+    uint256 public constant JOB_TTL_MAX = 17 days;
+    uint256 public constant FINALITY_GRACE = 91 minutes;
+    uint256 public constant MAX_METADATA_BYTES = 540;
+    uint256 public constant MAX_ATTEST_PAYLOAD = 700;
+
+    // ------------------------- Bootstrap addresses -------------------------
+    // NOTE: These are *example* bootstraps; roles can be rotated post-deploy.
+    // (All are EIP-55 checksummed to compile cleanly as literals.)
