@@ -598,3 +598,78 @@ contract GreenComputeX is GCXReentrancy {
         uint64 validUntil,
         uint64 deliverBy,
         uint32 units,
+        uint16 feeBps,
+        bytes32 requirements,
+        bytes32 metaHash,
+        bytes32 jobSalt
+    ) external payable nonReentrant whenLaneActive(LANE_JOB) returns (bytes32 jobId) {
+        if (!_tokenAllowed[address(0)]) revert GCX_UnsupportedToken(address(0));
+        if (msg.value == 0) revert GCX_InvalidParameter(keccak256("price.zero"));
+        jobId = _storeJob(
+            msg.sender,
+            address(0),
+            msg.value,
+            validUntil,
+            deliverBy,
+            units,
+            feeBps,
+            requirements,
+            metaHash,
+            jobSalt
+        );
+        _jobEscrow[jobId] = msg.value;
+        emit JobPosted(jobId, msg.sender, address(0), msg.value, deliverBy);
+    }
+
+    function postJobERC20(
+        address token,
+        uint256 totalPrice,
+        uint64 validUntil,
+        uint64 deliverBy,
+        uint32 units,
+        uint16 feeBps,
+        bytes32 requirements,
+        bytes32 metaHash,
+        bytes32 jobSalt
+    ) external nonReentrant whenLaneActive(LANE_JOB) returns (bytes32 jobId) {
+        if (token == address(0)) revert GCX_InvalidParameter(keccak256("token.use_eth_method"));
+        if (!_tokenAllowed[token]) revert GCX_UnsupportedToken(token);
+        if (totalPrice == 0) revert GCX_InvalidParameter(keccak256("price.zero"));
+        jobId = _storeJob(
+            msg.sender,
+            token,
+            totalPrice,
+            validUntil,
+            deliverBy,
+            units,
+            feeBps,
+            requirements,
+            metaHash,
+            jobSalt
+        );
+        _jobEscrow[jobId] = totalPrice;
+        IERC20Minimal(token).safeTransferFrom(msg.sender, address(this), totalPrice);
+        emit JobPosted(jobId, msg.sender, token, totalPrice, deliverBy);
+    }
+
+    function _storeJob(
+        address client,
+        address token,
+        uint256 totalPrice,
+        uint64 validUntil,
+        uint64 deliverBy,
+        uint32 units,
+        uint16 feeBps,
+        bytes32 requirements,
+        bytes32 metaHash,
+        bytes32 jobSalt
+    ) internal returns (bytes32 jobId) {
+        if (client == address(0)) revert GCX_ZeroAddress(keccak256("job.client"));
+        if (feeBps > MAX_FEE_BPS) revert GCX_TooLarge(keccak256("fee.bps"), feeBps, MAX_FEE_BPS);
+        if (units == 0) revert GCX_InvalidParameter(keccak256("units.zero"));
+
+        uint64 nowTs = uint64(block.timestamp);
+        if (validUntil <= nowTs) revert GCX_DeadlineElapsed(nowTs, validUntil);
+
+        if (deliverBy <= nowTs) revert GCX_DeadlineElapsed(nowTs, deliverBy);
+        if (deliverBy - nowTs < JOB_TTL_MIN) revert GCX_TooSmall(keccak256("deliverBy.min_ttl"), deliverBy - nowTs, JOB_TTL_MIN);
