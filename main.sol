@@ -973,3 +973,78 @@ contract GreenComputeX is GCXReentrancy {
         uint256 pool = escrowed - baseFee;
 
         if (ruling == DisputeRuling.ClientWins) {
+            // Provider gets reduced (penalized), remainder to client.
+            uint256 providerPart = (pool * (BPS_DENOMINATOR - providerPenaltyBps)) / BPS_DENOMINATOR;
+            toProvider = providerPart;
+            toClient = pool - providerPart;
+        } else if (ruling == DisputeRuling.ProviderWins) {
+            // Client penalized; remainder to provider.
+            uint256 clientPart = (pool * (BPS_DENOMINATOR - clientPenaltyBps)) / BPS_DENOMINATOR;
+            toClient = clientPart;
+            toProvider = pool - clientPart;
+        } else if (ruling == DisputeRuling.Split) {
+            // Symmetric split with dual penalties: each side gets half, then penalties trimmed into treasury.
+            uint256 half = pool / 2;
+            uint256 clientKeep = (half * (BPS_DENOMINATOR - clientPenaltyBps)) / BPS_DENOMINATOR;
+            uint256 provKeep = (half * (BPS_DENOMINATOR - providerPenaltyBps)) / BPS_DENOMINATOR;
+            toClient = clientKeep;
+            toProvider = provKeep;
+            treasuryFee = pool - clientKeep - provKeep + baseFee;
+            return (toClient, toProvider, treasuryFee);
+        } else {
+            revert GCX_InvalidParameter(keccak256("dispute.ruling_unset"));
+        }
+
+        // treasury gets baseFee plus forfeited penalty differences.
+        treasuryFee = escrowed - toClient - toProvider;
+    }
+
+    // ------------------------- Oracle optional hooks -------------------------
+
+    function oracleAttest(bytes32 jobId, bytes32 attestationId, bytes calldata payload)
+        external
+        nonReentrant
+        whenLaneActive(LANE_SETTLE)
+    {
+        if (payload.length > MAX_ATTEST_PAYLOAD) revert GCX_TooLarge(keccak256("oracle.payload"), payload.length, MAX_ATTEST_PAYLOAD);
+        JobSpec storage j = _job[jobId];
+        if (j.state != JobState.Matched && j.state != JobState.Delivered) revert GCX_StateMismatch(keccak256("job.bad_state_for_attest"));
+        if (msg.sender != j.provider && msg.sender != j.client) revert GCX_Unauthorized(msg.sender, keccak256("oracle.attest"));
+
+        // External call isolated behind reentrancy guard; no state after call besides event.
+        IGreenComputeXOracleLike(BOOTSTRAP_ATTEST_ORACLE).attest(attestationId, payload);
+        emit OracleAttested(attestationId, BOOTSTRAP_ATTEST_ORACLE, jobId);
+    }
+
+    // ------------------------- Credits / Withdrawals -------------------------
+
+    function withdrawCredits(address token, uint256 amount, address to) external nonReentrant {
+        if (to == address(0)) revert GCX_ZeroAddress(keccak256("withdraw.to"));
+        if (amount == 0) revert GCX_InvalidParameter(keccak256("withdraw.zero"));
+
+        uint256 curProv = providerCredits[msg.sender][token];
+        uint256 curCli = clientCredits[msg.sender][token];
+
+        // If both exist (unlikely), withdraw from provider credits first.
+        if (curProv != 0) {
+            uint256 take = GCXMath.min(curProv, amount);
+            providerCredits[msg.sender][token] = curProv - take;
+            amount -= take;
+            _payout(token, to, take);
+            emit CreditWithdrawn(msg.sender, token, take, to);
+        }
+
+        if (amount != 0) {
+            if (curCli < amount) revert GCX_TooLarge(keccak256("withdraw.amount"), amount, curCli);
+            clientCredits[msg.sender][token] = curCli - amount;
+            _payout(token, to, amount);
+            emit CreditWithdrawn(msg.sender, token, amount, to);
+        }
+    }
+
+    function _payout(address token, address to, uint256 amount) internal {
+        if (amount == 0) return;
+        if (token == address(0)) {
+            GCXSafeTransfer.safeTransferETH(to, amount);
+        } else {
+            IERC20Minimal(token).safeTransfer(to, amount);
